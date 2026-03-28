@@ -4408,6 +4408,10 @@ class TestVmapOperatorsOpInfo(TestCase):
                         sample.kwargs["memory_format"] == torch.channels_last
                     ),
                 ),
+                # Vmap batching rule converts groups=1 conv_transpose3d into
+                # groups=batch_size which hits a oneDNN deconvolution bug on PVC
+                # producing wrong results for ~50% of output elements.
+                xfail("nn.functional.conv_transpose3d", device_type=device_type),
             }
         ),
     )
@@ -4590,6 +4594,10 @@ class TestVmapOperatorsOpInfo(TestCase):
                 xfail(
                     "searchsorted"
                 ),  # aten::searchsorted.Scalar hit the vmap fallback which is currently disabled
+                # Vmap batching rule converts groups=1 conv_transpose3d into
+                # groups=batch_size which hits a oneDNN deconvolution bug on PVC
+                # producing wrong results for ~50% of output elements.
+                xfail("nn.functional.conv_transpose3d", device_type=device_type),
             }
         ),
     )
