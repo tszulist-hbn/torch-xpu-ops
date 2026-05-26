@@ -8871,10 +8871,10 @@
     SparseCsrXPU: sparse_compressed_to_sparse_csc
   autogen: _to_sparse_csc.out
 
-# - func: _to_sparse_semi_structured(Tensor dense) -> (Tensor, Tensor)
-#   variants: function
-#   dispatch:
-#     XPU: _to_sparse_semi_structured
+- func: _to_sparse_semi_structured(Tensor dense) -> (Tensor, Tensor)
+  variants: function
+  dispatch:
+    XPU: _to_sparse_semi_structured
 
 - func: copy_sparse_to_sparse_(Tensor(a!) self, Tensor src, bool non_blocking=False) -> Tensor(a!)
   device_check: NoCheck  # Allows copy into different device
