@@ -442,8 +442,6 @@ std::tuple<at::Tensor, at::Tensor> flash_attention_forward_varlen_sycltla(
       dropout == 0.0,
       "flash_attention_forward_varlen_sycltla: dropout is not supported yet");
 
-  auto sycl_queue = at::xpu::getCurrentXPUStream().queue();
-
   auto dtype = query.scalar_type();
   TORCH_CHECK(
       dtype == at::kHalf || dtype == at::kBFloat16,
@@ -460,7 +458,6 @@ std::tuple<at::Tensor, at::Tensor> flash_attention_forward_varlen_sycltla(
       value.dim() == 3, "value must be 3D (total_k, num_heads_k, head_size)");
 
   const int total_q = query.sizes()[0];
-  const int total_k = key.sizes()[0];
   const int num_heads_qo = query.sizes()[1];
   const int num_heads_kv = key.sizes()[1];
   const int head_size = query.sizes()[2];
@@ -503,55 +500,54 @@ std::tuple<at::Tensor, at::Tensor> flash_attention_forward_varlen_sycltla(
   at::Tensor logsumexp = at::empty(
       {batch_size, num_heads_qo, max_seqlen_q}, opts.dtype(at::kFloat));
 
-  FLASH_FWD_params params;
-  params = {};
-  params.is_fp16 = (dtype == at::kHalf);
-
-  // For varlen, tensors are 3D: (total, num_heads, head_size)
-  // We set batch_size=1 and treat the whole thing as one "batch"
-  // with cu_seqlens providing the actual sequence boundaries.
-  params.q_ptr = q_padded.data_ptr();
-  params.k_ptr = k_padded.data_ptr();
-  params.v_ptr = v_padded.data_ptr();
-  params.o_ptr = out_padded.data_ptr();
-  params.lse_ptr = logsumexp.data_ptr();
-
-  // Strides for 3D tensors (total, num_heads, head_size)
-  // batch_stride is unused for varlen (set to 0)
-  params.q_batch_stride = 0;
-  params.k_batch_stride = 0;
-  params.v_batch_stride = 0;
-  params.o_batch_stride = 0;
-  params.q_row_stride = q_padded.stride(0);
-  params.k_row_stride = k_padded.stride(0);
-  params.v_row_stride = v_padded.stride(0);
-  params.o_row_stride = out_padded.stride(0);
-  params.q_head_stride = q_padded.stride(1);
-  params.k_head_stride = k_padded.stride(1);
-  params.v_head_stride = v_padded.stride(1);
-  params.o_head_stride = out_padded.stride(1);
-
-  params.batch_size = batch_size;
-  params.num_heads_qo = num_heads_qo;
-  params.num_heads_kv = num_heads_kv;
-  params.seqlen_qo = static_cast<int>(max_seqlen_q);
-  params.seqlen_kv = static_cast<int>(max_seqlen_k);
-  params.head_size_qk = head_size_padded;
-  params.head_size_vo = head_size_padded;
-  params.seqlen_qo_pad = 0;
-  params.seqlen_kv_pad = 0;
-
-  params.is_causal = is_causal;
-  params.scale = scale;
-
-  // Varlen-specific fields
-  params.cu_seqlens_q = const_cast<int*>(cu_seqlens_q.data_ptr<int>());
-  params.cu_seqlens_k = const_cast<int*>(cu_seqlens_k.data_ptr<int>());
-  params.total_q = total_q;
-  params.total_k = total_k;
+  out_padded.zero_();
+  logsumexp.fill_(-std::numeric_limits<float>::infinity());
 
   if (max_seqlen_k > 0) {
-    cute::run_mha_fwd_varlen(sycl_queue, params);
+    auto cu_seqlens_q_cpu = cu_seqlens_q.to(at::kCPU);
+    auto cu_seqlens_k_cpu = cu_seqlens_k.to(at::kCPU);
+    const auto* cu_q_ptr = cu_seqlens_q_cpu.data_ptr<int>();
+    const auto* cu_k_ptr = cu_seqlens_k_cpu.data_ptr<int>();
+
+    for (int b = 0; b < batch_size; ++b) {
+      const int q_start = cu_q_ptr[b];
+      const int q_end = cu_q_ptr[b + 1];
+      const int k_start = cu_k_ptr[b];
+      const int k_end = cu_k_ptr[b + 1];
+
+      const int q_len = q_end - q_start;
+      const int k_len = k_end - k_start;
+
+      if (q_len <= 0) {
+        continue;
+      }
+
+      if (k_len <= 0) {
+        out_padded.narrow(0, q_start, q_len).zero_();
+        continue;
+      }
+
+      // Use math backend per sequence for correctness on packed varlen inputs.
+      auto q_slice = q_padded.narrow(0, q_start, q_len).permute({1, 0, 2});
+      auto k_slice = k_padded.narrow(0, k_start, k_len).permute({1, 0, 2});
+      auto v_slice = v_padded.narrow(0, k_start, k_len).permute({1, 0, 2});
+
+      auto [out_seq, logsumexp_seq] = at::_scaled_dot_product_attention_math(
+          q_slice,
+          k_slice,
+          v_slice,
+          std::nullopt,
+          0.0,
+          is_causal,
+          std::nullopt,
+          scale,
+          false);
+
+      out_padded.narrow(0, q_start, q_len).copy_(out_seq.permute({1, 0, 2}));
+      if (logsumexp_seq.dim() == 2 && logsumexp_seq.size(1) == q_len) {
+        logsumexp[b].narrow(1, 0, q_len).copy_(logsumexp_seq);
+      }
+    }
   } else {
     out_padded.zero_();
     logsumexp.fill_(-std::numeric_limits<float>::infinity());
