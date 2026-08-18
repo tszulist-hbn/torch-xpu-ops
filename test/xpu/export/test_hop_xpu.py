@@ -69,7 +69,7 @@ inline_asm_rocm_serialize_skips = (
 
 @unittest.skipIf(IS_WINDOWS, "Windows isn't supported for this case")
 @unittest.skipIf(not torchdynamo.is_dynamo_supported(), "dynamo isn't supported")
-class TestHOP(TestCase):
+class TestHOPDevice(TestCase):
     def _compare(self, eager_model, exported_program, args, kwargs):
         eager_args = copy.deepcopy(args)
         eager_kwargs = copy.deepcopy(kwargs)
@@ -173,7 +173,7 @@ class TestHOP(TestCase):
         torchdynamo._reset_guarded_backend_cache()
 
 
-instantiate_device_type_tests(TestHOP, globals(), only_for="xpu", allow_xpu=True)
+instantiate_device_type_tests(TestHOPDevice, globals(), only_for="xpu", allow_xpu=True)
 
 if __name__ == "__main__":
     run_tests()
